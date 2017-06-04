@@ -61,8 +61,34 @@ struct Vote {
     pub to: String,
 }
 
+fn gen_output(name: &str, blocks: &BTreeMap<String, Block>, votes: &BTreeSet<Vote>) {
+    let file = File::create(name).unwrap();
+    let mut writer = BufWriter::new(file);
+    let _ = write!(writer, "digraph {{\n");
+    for (b, block) in blocks {
+        let _ = write!(writer,
+                       "{} [label = {}; shape=box];\n",
+                       b,
+                       block.get_label());
+    }
+    for vote in votes {
+        let _ = write!(writer, "{}->{}\n", vote.from, vote.to);
+    }
+    let _ = write!(writer, "}}\n");
+}
+
+fn step_file(name: &str, step: u64) -> String {
+    if name.ends_with(".dot") {
+        let (name1, name2) = name.split_at(name.len() - 4);
+        format!("{}.{}{}", name1, step, name2)
+    } else {
+        format!("{}.{}.dot", name, step)
+    }
+}
+
 fn main() {
     let agreement_re = Regex::new(r"^Node\((?P<node>[0-9a-f]{6}\.\.)\): received agreement for Vote \{ from: Block \{ prefix: Prefix\((?P<pfrom>[01]*)\), version: (?P<vfrom>\d+), members: \{(?P<mfrom>[0-9a-f]{6}\.\.(, [0-9a-f]{6}\.\.)*)\} \}, to: Block \{ prefix: Prefix\((?P<pto>[01]*)\), version: (?P<vto>\d+), members: \{(?P<mto>[0-9a-f]{6}\.\.(, [0-9a-f]{6}\.\.)*)\} \} \}").unwrap();
+    let step_re = Regex::new(r"^-- step \d+ --").unwrap();
 
     let matches = App::new("ewok_graph")
         .about("Generates DOT files from Ewok logs")
@@ -75,9 +101,15 @@ fn main() {
                  .help("Sets the input file to use")
                  .required(true)
                  .index(1))
+        .arg(Arg::with_name("step")
+                 .short("s")
+                 .long("step")
+                 .help("If set, generates a DOT file for each simulation step")
+                 .takes_value(false))
         .get_matches();
     let input = matches.value_of("INPUT").unwrap();
     let output = matches.value_of("output").unwrap_or("output.dot");
+    let step_by_step = matches.is_present("step");
     let mut blocks = BTreeMap::new();
     let mut votes = BTreeSet::new();
 
@@ -86,7 +118,18 @@ fn main() {
     let mut line = String::new();
 
     println!("Reading log...");
+    let mut step = 0;
     while reader.read_line(&mut line).unwrap() > 0 {
+        if step_by_step && step_re.is_match(&line) {
+            if step > 0 {
+                println!("Outputting step {}...", step - 1);
+                let filename = step_file(output, step - 1);
+                gen_output(&filename, &blocks, &votes);
+            }
+            step += 1;
+            line.clear();
+            continue;
+        }
         if let Some(caps) = agreement_re.captures(&line) {
             let block_from = Block {
                 prefix: caps["pfrom"].to_owned(),
@@ -121,17 +164,10 @@ fn main() {
     }
 
     println!("Reading finished. Outputting the dot file...");
-    let file = File::create(output).unwrap();
-    let mut writer = BufWriter::new(file);
-    let _ = write!(writer, "digraph {{\n");
-    for (b, block) in blocks {
-        let _ = write!(writer,
-                       "{} [label = {}; shape=box];\n",
-                       b,
-                       block.get_label());
-    }
-    for vote in votes {
-        let _ = write!(writer, "{}->{}\n", vote.from, vote.to);
-    }
-    let _ = write!(writer, "}}\n");
+    let name = if step_by_step {
+        step_file(output, step - 1)
+    } else {
+        output.to_owned()
+    };
+    gen_output(&name, &blocks, &votes);
 }
