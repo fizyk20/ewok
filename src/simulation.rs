@@ -360,7 +360,7 @@ impl Simulation {
             }
             Stable { since_step } => {
                 if step >= since_step + self.params.stable_steps {
-                    if self.params.grow_prob_drop > 0.0 {
+                    if self.params.grow_prob_drop.is_positive() {
                         Shrinking
                     } else {
                         Finishing { since_step: step + 1 }

@@ -1,6 +1,6 @@
 use random::sample_single;
 use std::collections::BTreeMap;
-use params::SimulationParams;
+use params::{Probability, SimulationParams};
 use name::Name;
 use node::Node;
 use event::Event;
@@ -25,8 +25,19 @@ impl RandomEvents {
         }
 
         // Random remove.
-        if do_with_probability(self.params.prob_drop(phase)) {
-            events.push(self.random_remove(nodes));
+        match self.params.prob_drop(phase) {
+            Probability::PerNetwork(prob) => {
+                if do_with_probability(prob) {
+                    events.push(self.random_remove(nodes));
+                }
+            }
+            Probability::PerNode(prob) => {
+                for (node, _) in nodes {
+                    if do_with_probability(prob) {
+                        events.push(Event::RemoveNode(*node));
+                    }
+                }
+            }
         }
 
         events

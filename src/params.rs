@@ -2,6 +2,21 @@ use std::cmp;
 use simulation::Phase;
 use simulation::Phase::*;
 
+#[derive(Clone, Copy, Debug)]
+pub enum Probability {
+    PerNetwork(f64),
+    PerNode(f64),
+}
+
+impl Probability {
+    pub fn is_positive(&self) -> bool {
+        match *self {
+            Probability::PerNode(prob) |
+            Probability::PerNetwork(prob) => prob > 0.0,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SimulationParams {
     /// Maximum number of steps a message can be delayed by before it's delivered.
@@ -12,13 +27,13 @@ pub struct SimulationParams {
     /// Probability of a node joining on a given step during the network growth phase.
     pub grow_prob_join: f64,
     /// Probability of a node leaving on a given step during the network growth phase.
-    pub grow_prob_drop: f64,
+    pub grow_prob_drop: Probability,
     /// Probability of a node joining or leaving on a given step.
     pub prob_churn: f64,
     /// Probability of a node joining on a given step during the network shrinking phase.
     pub shrink_prob_join: f64,
     /// Probability of a node leaving on a given step during the network shrinking phase.
-    pub shrink_prob_drop: f64,
+    pub shrink_prob_drop: Probability,
     /// Probability that a two-way connection will be lost on any given step.
     pub prob_disconnect: f64,
     /// Probability that a lost two-way connection will be re-established on any given step.
@@ -42,11 +57,11 @@ impl SimulationParams {
         }
     }
 
-    pub fn prob_drop(&self, phase: Phase) -> f64 {
+    pub fn prob_drop(&self, phase: Phase) -> Probability {
         match phase {
-            Starting | Finishing { .. } => 0.0,
+            Starting | Finishing { .. } => Probability::PerNetwork(0.0),
             Growth => self.grow_prob_drop,
-            Stable { .. } => self.prob_churn,
+            Stable { .. } => Probability::PerNetwork(self.prob_churn),
             Shrinking => self.shrink_prob_drop,
         }
     }
