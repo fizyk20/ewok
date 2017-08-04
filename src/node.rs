@@ -230,7 +230,7 @@ impl Node {
                 .iter()
                 .filter(|name| {
                     !self.connections.contains(name) && !self.connect_requests.contains(name) &&
-                    **name != our_name
+                        **name != our_name
                 })
                 .cloned()
                 .collect()
@@ -351,9 +351,7 @@ impl Node {
                 self.connections.contains(name) &&
                     candidate.is_recent(self.params.join_timeout, step)
             })
-            .min_by_key(|&(_, candidate)| candidate.step_added)
             .map(|(name, _)| *name)
-            .into_iter()
             .collect()
     }
 
@@ -505,7 +503,8 @@ impl Node {
             message.hash(&mut hasher);
             let hash = hasher.finish();
             if message.content == Connect || message.content == Disconnect ||
-                !self.message_filter.contains(&hash) {
+                !self.message_filter.contains(&hash)
+            {
                 filtered.push(message);
                 if self.message_filter.len() == MESSAGE_FILTER_LEN {
                     let _ = self.message_filter.pop_front();
