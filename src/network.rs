@@ -152,7 +152,8 @@ mod test {
         let connect = test_message(Connect);
         let disconnect = test_message(Disconnect);
 
-        let conn_messages = btreemap! {
+        let conn_messages =
+            btreemap! {
             50 => vec![connect.clone()],
             51 => vec![disconnect.clone()],
         };
@@ -184,7 +185,8 @@ mod test {
         let connect = test_message(Connect);
         let disconnect = test_message(Disconnect);
 
-        let conn_messages = btreemap! {
+        let conn_messages =
+            btreemap! {
             50 => vec![connect.clone(), disconnect.clone()],
         };
         let max_delay = 20;

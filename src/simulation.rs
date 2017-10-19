@@ -3,18 +3,17 @@ use std::mem;
 use itertools::Itertools;
 
 use network::Network;
+use routing_table::RoutingTable;
 use event::Event;
 use event_schedule::EventSchedule;
 use node::Node;
 use name::{Name, Prefix};
-use block::{Block, BlockId};
-use blocks::Blocks;
+use block::BlockId;
 use generate::generate_network;
-use consistency::check_consistency;
 use message::Message;
 use message::MessageContent::*;
 use params::{NodeParams, SimulationParams, quorum};
-use random::{sample_single, do_with_probability, seed};
+use random::{sample_single, do_with_probability};
 use random_events::RandomEvents;
 use self::detail::DisconnectedPair;
 
@@ -66,10 +65,9 @@ pub enum Phase {
 
 pub struct Simulation {
     nodes: BTreeMap<Name, Node>,
-    blocks: Blocks,
     network: Network,
     /// Set of blocks that all nodes start from (often just a single genesis block).
-    genesis_set: BTreeSet<BlockId>,
+    genesis_rt: RoutingTable,
     /// Parameters for the network and the simulation.
     params: SimulationParams,
     /// Parameters for nodes.
@@ -108,15 +106,13 @@ impl Simulation {
         params: SimulationParams,
         node_params: NodeParams,
     ) -> Self {
-        let mut blocks = Blocks::new();
-        let (nodes, genesis_set) = generate_network(&mut blocks, &sections, &node_params);
+        let (nodes, genesis_rt) = generate_network(&sections, &node_params);
         let network = Network::new(params.max_delay);
         let random_events = RandomEvents::new(params.clone(), node_params.clone());
 
         Simulation {
-            blocks,
             nodes,
-            genesis_set,
+            genesis_rt,
             network,
             params,
             node_params,
@@ -129,9 +125,8 @@ impl Simulation {
 
     fn apply_add_node(&mut self, joining: Name, step: u64) {
         // Make the node active, and let it build its way up from the genesis block(s).
-        let genesis_set = self.genesis_set.clone();
         let params = self.node_params.clone();
-        let node = Node::new(joining, &self.blocks, genesis_set, params, step);
+        let node = Node::new(joining, self.genesis_rt.clone(), params, step);
         self.nodes.insert(joining, node);
     }
 
@@ -238,11 +233,7 @@ impl Simulation {
         let mut events = vec![];
         events.extend(self.event_schedule.get_events(step));
         if self.event_schedule.is_empty() {
-            events.extend(self.random_events.get_events(
-                self.phase,
-                &self.blocks,
-                &self.nodes,
-            ));
+            events.extend(self.random_events.get_events(self.phase, &self.nodes));
         }
         trace!("events: {:?}", events);
 
@@ -269,7 +260,8 @@ impl Simulation {
     }
 
     /// Run the simulation, returning Ok iff the network was consistent upon termination.
-    pub fn run(&mut self) -> Result<BTreeMap<Prefix, Block>, [u32; 4]> {
+    pub fn run(&mut self) {
+        //-> Result<BTreeMap<Prefix, Block>, [u32; 4]> {
         let max_extra_steps = 1000;
         let mut no_op_step_count = 0;
 
@@ -309,7 +301,7 @@ impl Simulation {
             for message in delivered {
                 match self.nodes.get_mut(&message.recipient) {
                     Some(node) => {
-                        let new_messages = node.handle_message(message, &self.blocks, step);
+                        let new_messages = node.handle_message(message, step);
                         self.network.send(step, new_messages);
                     }
                     None => {
@@ -321,7 +313,7 @@ impl Simulation {
             // Shutdown nodes that have failed to join.
             let mut to_shutdown = BTreeSet::new();
             for (name, node) in &self.nodes {
-                if node.should_shutdown(&self.blocks, step) {
+                if node.should_shutdown(step) {
                     to_shutdown.insert(*name);
                 }
             }
@@ -335,25 +327,8 @@ impl Simulation {
 
             // Update node state (current blocks), and send new votes.
             for node in self.nodes.values_mut() {
-                match node.our_current_blocks(&self.blocks).into_iter().count() {
-                    0 => (),
-                    1 => node.check_conflicting_block_count(&self.blocks),
-                    count => {
-                        panic!(
-                            "{:?}\nhas {} current blocks for own section.",
-                            node.as_debug(&self.blocks),
-                            count
-                        )
-                    }
-                }
-                self.network.send(
-                    step,
-                    node.update_state(&mut self.blocks, step),
-                );
-                self.network.send(
-                    step,
-                    node.broadcast_new_votes(&mut self.blocks, step),
-                );
+                self.network.send(step, node.update_state(step));
+                self.network.send(step, node.broadcast_new_votes(step));
             }
 
             self.phase = self.phase_for_next_step(step);
@@ -366,7 +341,7 @@ impl Simulation {
 
         debug!("-- final node states --");
         for node in self.nodes.values() {
-            debug!("{:?}", node.as_debug(&self.blocks));
+            debug!("{:?}", node);
             trace!("{:#?}", node.connections);
         }
 
@@ -377,11 +352,11 @@ impl Simulation {
             max_extra_steps
         );
 
-        check_consistency(
-            &self.blocks,
-            &self.nodes,
-            self.node_params.min_section_size as usize,
-        ).map_err(|_| seed())
+        //check_consistency(
+        //    &self.blocks,
+        //    &self.nodes,
+        //    self.node_params.min_section_size as usize,
+        //).map_err(|_| seed())
     }
 
     fn phase_for_next_step(&self, step: u64) -> Phase {

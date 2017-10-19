@@ -1,7 +1,8 @@
 //! Functions for generating sections of a certain size.
 
-use block::{Block, BlockId};
-use blocks::{Blocks, CurrentBlocks};
+use block::{NetworkEvent, Block};
+use chain::Chain;
+use routing_table::RoutingTable;
 use name::{Name, Prefix};
 use node::Node;
 use params::NodeParams;
@@ -13,10 +14,9 @@ use std::collections::{BTreeMap, BTreeSet};
 ///
 /// `sections`: map from prefix to desired size for that section.
 pub fn generate_network(
-    blocks: &mut Blocks,
     sections: &BTreeMap<Prefix, usize>,
     params: &NodeParams,
-) -> (BTreeMap<Name, Node>, BTreeSet<BlockId>) {
+) -> (BTreeMap<Name, Node>, RoutingTable) {
     // Check that the supplied prefixes describe a whole network.
     assert!(
         Prefix::empty().is_covered_by(sections.keys()),
@@ -30,35 +30,35 @@ pub fn generate_network(
         nodes_by_section.insert(*prefix, node_names);
     }
 
-    let current_blocks: CurrentBlocks = construct_blocks(nodes_by_section.clone())
-        .into_iter()
-        .map(|b| blocks.insert(b))
-        .collect();
+    let current_chains = construct_chains(nodes_by_section.clone());
 
     let nodes = nodes_by_section
         .into_iter()
         .flat_map(|(_, names)| names)
         .map(|name| {
-            (
-                name,
-                Node::new(name, blocks, current_blocks.clone(), params.clone(), 0),
-            )
+            let routing_table = RoutingTable::from_chains(name, &current_chains);
+            (name, Node::new(name, routing_table, params.clone(), 0))
         })
         .collect();
 
-    (nodes, current_blocks)
+    (nodes, RoutingTable::new())
 }
 
 /// Construct a set of blocks to describe the given sections.
-fn construct_blocks(nodes: BTreeMap<Prefix, BTreeSet<Name>>) -> BTreeSet<Block> {
+fn construct_chains(nodes: BTreeMap<Prefix, BTreeSet<Name>>) -> BTreeMap<Prefix, Chain> {
+    // Hack - use a split block as the initial block in chains for all prefixes
+    // TODO: find a better way
     nodes
         .into_iter()
         .map(|(prefix, members)| {
-            Block {
-                prefix,
-                members,
-                version: 0,
-            }
+            let block = Block {
+                event: NetworkEvent::Split(prefix),
+                members: members.into_iter().map(|name| (name, true)).collect(),
+                invalid_votes: BTreeSet::new(),
+            };
+            let mut chain = Chain::new();
+            chain.append(block);
+            (prefix, chain)
         })
         .collect()
 }

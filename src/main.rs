@@ -24,5 +24,5 @@ fn main() {
 
     let mut simulation = Simulation::new(params, NodeParams::default());
 
-    simulation.run().unwrap();
+    simulation.run(); //.unwrap();
 }

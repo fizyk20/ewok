@@ -1,101 +1,41 @@
 use name::{Prefix, Name};
-use blocks::Blocks;
+use std::mem;
 
-use std::collections::BTreeSet;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use std::collections::{BTreeSet, BTreeMap};
 
 #[derive(Clone, Debug, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct BlockId(u64);
+pub struct BlockId(pub NetworkEvent);
 
 impl BlockId {
-    pub fn into_block<'a>(&self, blocks: &'a Blocks) -> &'a Block {
-        blocks.get(self).unwrap()
+    pub fn into_event(self) -> NetworkEvent {
+        self.0
     }
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub enum NetworkEvent {
+    NodeGained(Name),
+    NodeLost(Name),
+    Merge(Prefix),
+    Split(Prefix),
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Block {
-    pub prefix: Prefix,
-    pub version: u64,
-    pub members: BTreeSet<Name>,
+    pub event: NetworkEvent,
+    pub members: BTreeMap<Name, bool>,
+    pub invalid_votes: BTreeSet<Name>,
 }
 
 impl Block {
-    /// Returns `true` if `other` should be removed from the current blocks when `self` is a
-    /// current candidate.
-    pub fn outranks(&self, other: &Block) -> bool {
-        if self.prefix == other.prefix {
-            if self.members.len() != other.members.len() {
-                self.members.len() > other.members.len()
-            } else {
-                self.members > other.members
-            }
-        } else {
-            self.prefix.is_compatible(&other.prefix) &&
-                self.prefix.bit_count() < other.prefix.bit_count()
-        }
-    }
-
-    pub fn should_split(&self, min_split_size: usize) -> bool {
-        let p0 = self.prefix.pushed(false);
-        let mut len0 = 0;
-        let mut len1 = 0;
-        for name in &self.members {
-            if p0.matches(*name) {
-                len0 += 1;
-            } else {
-                len1 += 1;
-            }
-        }
-        len0 >= min_split_size && len1 >= min_split_size
-    }
-
     pub fn get_id(&self) -> BlockId {
-        let mut s = DefaultHasher::new();
-        self.hash(&mut s);
-        BlockId(s.finish())
+        BlockId(self.event)
     }
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Vote {
-    pub from: BlockId,
-    pub to: BlockId,
-}
-
-impl Vote {
-    pub fn as_debug<'a>(&self, blocks: &'a Blocks) -> DebugVote<'a> {
-        DebugVote {
-            from: self.from.into_block(blocks),
-            to: self.to.into_block(blocks),
-        }
-    }
-
-    pub fn is_witnessing(&self, blocks: &Blocks) -> bool {
-        !self.to.into_block(blocks).is_admissible_after(
-            self.from.into_block(blocks),
-        )
-    }
-
-    pub fn is_quorum(&self, blocks: &Blocks, voters: &BTreeSet<Name>) -> bool {
-        let from = self.from.into_block(blocks);
-        let to = self.to.into_block(blocks);
-        let members = if to.members.len() == from.members.len() - 1 &&
-            from.members.difference(&to.members).count() == 1
-        {
-            &to.members
-        } else {
-            &from.members
-        };
-        is_quorum_of(voters, members)
-    }
-}
-
-#[derive(Debug)]
-pub struct DebugVote<'a> {
-    pub from: &'a Block,
-    pub to: &'a Block,
+    pub block_id: BlockId,
 }
 
 #[cfg(feature = "fast")]
@@ -104,103 +44,127 @@ fn abs_diff(x: usize, y: usize) -> usize {
 }
 
 impl Block {
-    /// Create a genesis block.
-    pub fn genesis(name: Name) -> Self {
+    pub fn genesis(event: NetworkEvent) -> Block {
         Block {
-            prefix: Prefix::default(),
-            version: 0,
-            members: btreeset!{name},
+            event,
+            members: BTreeMap::new(),
+            invalid_votes: BTreeSet::new(),
+        }
+    }
+
+    pub fn clone_members(&self) -> BTreeMap<Name, bool> {
+        self.members
+            .iter()
+            .map(|(&name, _)| (name, false))
+            .collect()
+    }
+
+    pub fn apply_event(&self) -> BTreeMap<Name, bool> {
+        let mut members = self.clone_members();
+        match self.event {
+            NetworkEvent::NodeGained(name) => {
+                members.insert(name, false);
+            }
+            NetworkEvent::NodeLost(name) => {
+                assert!(members.remove(&name).is_some());
+            }
+            NetworkEvent::Split(prefix) => {
+                members = members
+                    .into_iter()
+                    .filter(|&(name, _)| prefix.matches(name))
+                    .collect();
+            }
+            _ => (),
+        }
+        members
+    }
+
+    /// Sorts the collected votes into valid and invalid based on the new members list
+    pub fn adjust_votes(&mut self, other: BTreeMap<Name, bool>) {
+        // check who of the new members already voted
+        let new_members = other
+            .into_iter()
+            .map(|(name, _)| {
+                (
+                    name,
+                    self.members.get(&name).cloned().unwrap_or(false) ||
+                        self.invalid_votes.contains(&name),
+                )
+            })
+            .collect();
+        let old_members = mem::replace(&mut self.members, new_members);
+        // save old names that voted, even if invalid now
+        let new_invalid_votes = old_members
+            .into_iter()
+            .filter(|&(name, voted)| voted && !self.members.contains_key(&name))
+            .map(|(name, _)| name)
+            .chain(
+                self.invalid_votes
+                    .iter()
+                    .filter(|&name| !self.members.contains_key(name))
+                    .cloned(),
+            )
+            .collect();
+        self.invalid_votes = new_invalid_votes;
+    }
+
+    pub fn add_vote(&mut self, voter: Name) {
+        if self.members.contains_key(&voter) {
+            let _ = self.members.insert(voter, true);
+        } else {
+            self.invalid_votes.insert(voter);
+        }
+    }
+
+    pub fn from_event(&self, event: NetworkEvent) -> Self {
+        let members = self.apply_event();
+        Block {
+            event,
+            members,
+            invalid_votes: BTreeSet::new(),
         }
     }
 
     /// Create a new block with a node added.
-    pub fn add_node(&self, added: Name) -> Self {
-        let mut members = self.members.clone();
-        members.insert(added);
+    pub fn node_added(&self, added: Name) -> Self {
+        let members = self.apply_event();
         Block {
-            prefix: self.prefix,
-            version: self.version + 1,
+            event: NetworkEvent::NodeGained(added),
             members,
+            invalid_votes: BTreeSet::new(),
         }
     }
 
     /// Create a new block with a node removed.
-    pub fn remove_node(&self, removed: Name) -> Self {
-        let mut members = self.members.clone();
-        assert!(members.remove(&removed));
+    pub fn node_removed(&self, removed: Name) -> Self {
+        let members = self.apply_event();
         Block {
-            prefix: self.prefix,
-            version: self.version + 1,
+            event: NetworkEvent::NodeLost(removed),
             members,
+            invalid_votes: BTreeSet::new(),
         }
     }
 
-
-    /// Is this block admissible after the given other block?
-    ///
-    /// We have 2 versions of this function: a real BFT one and a fast one that's only
-    /// safe in the simulation.
-    #[cfg(not(feature = "fast"))]
-    pub fn is_admissible_after(&self, other: &Block) -> bool {
-        // This is the proper BFT version of `is_admissible_after`.
-        if self.version <= other.version {
-            return false;
-        }
-
-        // Add/remove case.
-        if self.prefix == other.prefix {
-            self.members.symmetric_difference(&other.members).count() == 1
-        }
-        // Split case.
-        else if self.prefix.popped() == other.prefix {
-            let filtered = other.members.iter().filter(
-                |name| self.prefix.matches(**name),
-            );
-            self.members.iter().eq(filtered)
-        }
-        // Merge case
-        else if other.prefix.popped() == self.prefix {
-            let filtered = self.members.iter().filter(
-                |name| other.prefix.matches(**name),
-            );
-            other.members.iter().eq(filtered)
-        } else {
-            false
+    pub fn section_split(&self, to_prefix: Prefix) -> Self {
+        let members = self.apply_event();
+        Block {
+            event: NetworkEvent::Split(to_prefix),
+            members,
+            invalid_votes: BTreeSet::new(),
         }
     }
 
-    #[cfg(feature = "fast")]
-    pub fn is_admissible_after(&self, other: &Block) -> bool {
-        // This is an approximate version of `is_admissible_after` that is sufficient
-        // for the simulation (because nobody votes invalidly), and is much faster.
-        if self.version <= other.version {
-            return false;
-        }
-
-        // Add/remove case.
-        if self.prefix == other.prefix {
-            abs_diff(self.members.len(), other.members.len()) == 1
-        }
-        // Split case.
-        else if self.prefix.popped() == other.prefix {
-            true
-        }
-        // Merge case
-        else if other.prefix.popped() == self.prefix {
-            true
-        } else {
-            false
+    pub fn section_merge(&self, to_prefix: Prefix) -> Self {
+        let members = self.apply_event();
+        Block {
+            event: NetworkEvent::Merge(to_prefix),
+            members,
+            invalid_votes: BTreeSet::new(),
         }
     }
-}
 
-/// Return true if `voters` form a quorum of `members`.
-fn is_quorum_of(voters: &BTreeSet<Name>, members: &BTreeSet<Name>) -> bool {
-    #[cfg(not(feature = "fast"))]
-    let valid_voters = voters & members;
-    #[cfg(feature = "fast")]
-    let valid_voters = voters;
-
-    assert_eq!(voters.len(), valid_voters.len());
-    valid_voters.len() * 2 > members.len()
+    pub fn has_consensus(&self) -> bool {
+        let num_votes = self.members.iter().filter(|&(_, voted)| *voted).count();
+        num_votes * 2 > self.members.len()
+    }
 }
